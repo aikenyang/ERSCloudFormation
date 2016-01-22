@@ -1,0 +1,468 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "Setup 2 NATs and Bastion.",
+  "Parameters": {
+    "Prefix": {
+      "Description": "prefix of resources",
+      "Type": "String",
+      "MinLength": "1",
+      "MaxLength": "24",
+      "ConstraintDescription": "Length is too long"
+    },
+    "NatBastionAmiId": {
+      "Description": "AMI image id",
+      "Type": "String",
+      "MinLength": "1",
+      "MaxLength": "24"
+    },
+    "SecurityGroupNat":{
+      "Description": "Security Group Nat",
+      "Type": "String"
+      },
+    "SecurityGroupBastion":{
+      "Description": "Security Group Bastion",
+      "Type": "String"
+    },
+    "NatInstanceClass": {
+      "Default": "t2.micro",
+      "Description": "NAT EC2 instance class",
+      "Type": "String",
+      "AllowedValues": [
+        "t2.micro",
+        "t2.medium",
+        "m3.medium",
+        "c4.xlarge"
+      ],
+      "ConstraintDescription": "Please check AllowedValues if constraint happens"
+    },
+    "KeyPair": {
+      "Description": "EC2 ssh keypair name",
+      "Type": "String",
+      "MinLength": "1",
+      "MaxLength": "64",
+      "ConstraintDescription": "Length is too long"
+    },
+    "AdminCidr": {
+      "Description": "admin IP for bastion",
+      "Type": "String",
+      "MinLength": "1",
+      "MaxLength": "32",
+      "ConstraintDescription": "Length is too long"
+    },
+    "CIDRPrefix": {
+      "Default": "10.11",
+      "Description": "network cidr prefix: xx.xx",
+      "Type": "String",
+      "MinLength": "1",
+      "MaxLength": "8",
+      "ConstraintDescription": "Length is too long"
+    },
+    "VPC": {
+      "Description": "VPC id",
+      "Type": "String"
+    },
+    "SubnetPublic1": {
+      "Type": "String"
+    },
+    "SubnetPublic2": {
+      "Type": "String"
+    },
+    "RouteTableNat1": {
+      "Type": "String"
+    },
+    "RouteTableNat2": {
+      "Type": "String"
+    }
+  },
+  "Resources": {
+    "NATRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": ["ec2.amazonaws.com"]
+              },
+              "Action": ["sts:AssumeRole"]
+            }
+          ]
+        },
+        "Path": "/",
+        "Policies": [
+          {
+            "PolicyName": "NAT_Takeover",
+            "PolicyDocument": {
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "ec2:DescribeInstances",
+                    "ec2:DescribeRouteTables",
+                    "ec2:CreateRoute",
+                    "ec2:ReplaceRoute",
+                    "ec2:StartInstances",
+                    "ec2:StopInstances"
+                  ],
+                  "Resource": "*"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "NATRoleProfile": {
+      "Type": "AWS::IAM::InstanceProfile",
+      "DependsOn": ["NATRole"],
+      "Properties": {
+        "Path": "/",
+        "Roles": [
+          {
+            "Ref": "NATRole"
+          }
+        ]
+      }
+    },
+    "EC2InstanceNat1": {
+      "Type": "AWS::EC2::Instance",
+      "Metadata": {
+        "Comment1": "Create NAT #1"
+      },
+      "Properties": {
+        "InstanceType": {
+          "Ref": "NatInstanceClass"
+        },
+        "KeyName": {
+          "Ref": "KeyPair"
+        },
+        "SubnetId": {
+          "Ref": "SubnetPublic1"
+        },
+        "IamInstanceProfile": {"Ref": "NATRoleProfile"},
+        "SourceDestCheck": "false",
+        "ImageId": {"Ref": "NatBastionAmiId"},
+        "SecurityGroupIds": [
+          {
+            "Ref": "SecurityGroupNat"
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "Stack",
+            "Value": {
+              "Ref": "AWS::StackId"
+            }
+          },
+          {
+            "Key": "Name",
+            "Value": {
+              "Fn::Join": [
+                ".",
+                [
+                  {
+                    "Ref": "Prefix"
+                  },
+                  "vpc",
+                  "a",
+                  "i",
+                  "nat"
+                ]
+              ]
+            }
+          },
+          {
+            "Key": "EnvName",
+            "Value": {
+              "Ref": "Prefix"
+            }
+          }
+        ],
+        "UserData": {
+          "Fn::Base64": {
+            "Fn::Join": [
+              "",
+              [
+                "#!/bin/bash -v\n",
+                "# Update aws cli\n",
+                "yum update -y aws*\n",
+                ". /etc/profile.d/aws-apitools-common.sh\n",
+                "# Configure iptables\n",
+                "/sbin/iptables -t nat -A POSTROUTING -o eth0 -s 0.0.0.0/0 -j MASQUERADE\n",
+                "/sbin/iptables-save > /etc/sysconfig/iptables\n",
+                "# Configure ip forwarding and redirects\n",
+                "echo 1 >  /proc/sys/net/ipv4/ip_forward && echo 0 >  /proc/sys/net/ipv4/conf/eth0/send_redirects\n",
+                "mkdir -p /etc/sysctl.d/\n",
+                "cat <<EOF > /etc/sysctl.d/nat.conf\n",
+                "net.ipv4.ip_forward = 1\n",
+                "net.ipv4.conf.eth0.send_redirects = 0\n",
+                "EOF\n",
+                "# Move nat_monitor.sh and configure\n",
+                "cd /root\n",
+                "mv /tmp/nat_monitor.sh .\n",
+                "# Wait for NAT #2 to boot up and update RouteTableNat2\n",
+                "sleep 180\n",
+                "NAT_ID=\n",
+                "# CloudFormation should have updated the RouteTableNat2 by now (due to yum update), however loop to make sure\n",
+                "while [ \"$NAT_ID\" == \"\" ]; do\n",
+                "  sleep 60\n",
+                "  NAT_ID=`/opt/aws/bin/ec2-describe-route-tables ",
+                {"Ref": "RouteTableNat2"},
+                " -U https://ec2.",
+                {"Ref": "AWS::Region"},
+                ".amazonaws.com | grep 0.0.0.0/0 | awk '{print $2;}'`\n",
+                "  #echo `date` \"-- NAT_ID=$NAT_ID\" >> /var/log/nat_monitor.log\n",
+                "done\n",
+                "# Update NAT_ID, NAT_RT_ID, and My_RT_ID\n",
+                "sed \"s/NAT_ID=/NAT_ID=$NAT_ID/g\" /root/nat_monitor.sh > /root/nat_monitor.tmp\n",
+                "sed \"s/NAT_RT_ID=/NAT_RT_ID=",
+                {"Ref": "RouteTableNat2"},
+                "/g\" /root/nat_monitor.tmp > /root/nat_monitor.sh\n",
+                "sed \"s/My_RT_ID=/My_RT_ID=",
+                {"Ref": "RouteTableNat1"},
+                "/g\" /root/nat_monitor.sh > /root/nat_monitor.tmp\n",
+                "sed \"s/EC2_URL=/EC2_URL=https:\\/\\/ec2.",
+                {"Ref": "AWS::Region"},
+                ".amazonaws.com",
+                "/g\" /root/nat_monitor.tmp > /root/nat_monitor.sh\n",
+                "chmod a+x /root/nat_monitor.sh\n",
+                "echo '@reboot /root/nat_monitor.sh > /var/log/nat_monitor.log' | crontab\n",
+                "/root/nat_monitor.sh > /var/log/nat_monitor.log &\n"
+              ]
+            ]
+          }
+        }
+      }
+    },
+    "EC2InstanceNat2": {
+      "Type": "AWS::EC2::Instance",
+      "Metadata": {
+        "Comment1": "Create NAT #2"
+      },
+      "Properties": {
+        "InstanceType": {
+          "Ref": "NatInstanceClass"
+        },
+        "KeyName": {
+          "Ref": "KeyPair"
+        },
+        "SubnetId": {
+          "Ref": "SubnetPublic2"
+        },
+        "IamInstanceProfile": {"Ref": "NATRoleProfile"},
+        "SourceDestCheck": "false",
+        "ImageId": {"Ref": "NatBastionAmiId"},
+        "SecurityGroupIds": [
+          {
+            "Ref": "SecurityGroupNat"
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "Stack",
+            "Value": {
+              "Ref": "AWS::StackId"
+            }
+          },
+          {
+            "Key": "Name",
+            "Value": {
+              "Fn::Join": [
+                ".",
+                [
+                  {
+                    "Ref": "Prefix"
+                  },
+                  "vpc",
+                  "b",
+                  "i",
+                  "nat"
+                ]
+              ]
+            }
+          },
+          {
+            "Key": "EnvName",
+            "Value": {
+              "Ref": "Prefix"
+            }
+          }
+        ],
+        "UserData": {
+          "Fn::Base64": {
+            "Fn::Join": [
+              "",
+              [
+                "#!/bin/bash -v\n",
+                "# Update aws cli\n",
+                "yum update -y aws*\n",
+                ". /etc/profile.d/aws-apitools-common.sh\n",
+                "# Configure iptables\n",
+                "/sbin/iptables -t nat -A POSTROUTING -o eth0 -s 0.0.0.0/0 -j MASQUERADE\n",
+                "/sbin/iptables-save > /etc/sysconfig/iptables\n",
+                "# Configure ip forwarding and redirects\n",
+                "echo 1 >  /proc/sys/net/ipv4/ip_forward && echo 0 >  /proc/sys/net/ipv4/conf/eth0/send_redirects\n",
+                "mkdir -p /etc/sysctl.d/\n",
+                "cat <<EOF > /etc/sysctl.d/nat.conf\n",
+                "net.ipv4.ip_forward = 1\n",
+                "net.ipv4.conf.eth0.send_redirects = 0\n",
+                "EOF\n",
+                "# Move nat_monitor.sh and configure\n",
+                "cd /root\n",
+                "mv /tmp/nat_monitor.sh .\n",
+                "# Wait for NAT #1 to boot up and update RouteTableNat1\n",
+                "sleep 180\n",
+                "NAT_ID=\n",
+                "# CloudFormation should have updated the RouteTableNat1 by now (due to yum update), however loop to make sure\n",
+                "while [ \"$NAT_ID\" == \"\" ]; do\n",
+                "  sleep 60\n",
+                "  NAT_ID=`/opt/aws/bin/ec2-describe-route-tables ",
+                {"Ref": "RouteTableNat1"},
+                " -U https://ec2.",
+                {"Ref": "AWS::Region"},
+                ".amazonaws.com | grep 0.0.0.0/0 | awk '{print $2;}'`\n",
+                "  #echo `date` \"-- NAT_ID=$NAT_ID\" >> /var/log/nat_monitor.log\n",
+                "done\n",
+                "# Update NAT_ID, NAT_RT_ID, and My_RT_ID\n",
+                "sed \"s/NAT_ID=/NAT_ID=$NAT_ID/g\" /root/nat_monitor.sh > /root/nat_monitor.tmp\n",
+                "sed \"s/NAT_RT_ID=/NAT_RT_ID=",
+                {"Ref": "RouteTableNat1"},
+                "/g\" /root/nat_monitor.tmp > /root/nat_monitor.sh\n",
+                "sed \"s/My_RT_ID=/My_RT_ID=",
+                {"Ref": "RouteTableNat2"},
+                "/g\" /root/nat_monitor.sh > /root/nat_monitor.tmp\n",
+                "sed \"s/EC2_URL=/EC2_URL=https:\\/\\/ec2.",
+                {"Ref": "AWS::Region"},
+                ".amazonaws.com",
+                "/g\" /root/nat_monitor.tmp > /root/nat_monitor.sh\n",
+                "chmod a+x /root/nat_monitor.sh\n",
+                "echo '@reboot /root/nat_monitor.sh > /var/log/nat_monitor.log' | crontab\n",
+                "/root/nat_monitor.sh > /var/log/nat_monitor.log &\n"
+              ]
+            ]
+          }
+        }
+      }
+    },
+    "EC2InstanceBastion": {
+      "Type": "AWS::EC2::Instance",
+      "Properties": {
+        "InstanceType": "t2.micro",
+        "KeyName": {
+          "Ref": "KeyPair"
+        },
+        "SubnetId": {
+          "Ref": "SubnetPublic1"
+        },
+        "ImageId": {"Ref": "NatBastionAmiId"},
+        "SecurityGroupIds": [
+          {
+            "Ref": "SecurityGroupBastion"
+          }
+        ],
+        "Tags": [
+          {
+            "Key": "Stack",
+            "Value": {
+              "Ref": "AWS::StackId"
+            }
+          },
+          {
+            "Key": "Name",
+            "Value": {
+              "Fn::Join": [
+                ".",
+                [
+                  {
+                    "Ref": "Prefix"
+                  },
+                  "vpc",
+                  "a",
+                  "i",
+                  "bastion"
+                ]
+              ]
+            }
+          },
+          {
+            "Key": "EnvName",
+            "Value": {
+              "Ref": "Prefix"
+            }
+          }
+        ]
+      }
+    },
+    "EC2InstanceBastionEIP": {
+      "Type": "AWS::EC2::EIP",
+      "Properties": {
+        "InstanceId": {
+          "Ref": "EC2InstanceBastion"
+        },
+        "Domain": "vpc"
+      }
+    },
+    "EC2InstanceNat1EIP": {
+      "Type": "AWS::EC2::EIP",
+      "Properties": {
+        "InstanceId": {
+          "Ref": "EC2InstanceNat1"
+        },
+        "Domain": "vpc"
+      }
+    },
+    "EC2InstanceNat2EIP": {
+      "Type": "AWS::EC2::EIP",
+      "Properties": {
+        "InstanceId": {
+          "Ref": "EC2InstanceNat2"
+        },
+        "Domain": "vpc"
+      }
+    },
+    "RouteNat1": {
+      "Type": "AWS::EC2::Route",
+      "DependsOn": "EC2InstanceNat1",
+      "Properties": {
+        "RouteTableId": {
+          "Ref": "RouteTableNat1"
+        },
+        "DestinationCidrBlock": "0.0.0.0/0",
+        "InstanceId": {
+          "Ref": "EC2InstanceNat1"
+        }
+      }
+    },
+    "RouteNat2": {
+      "Type": "AWS::EC2::Route",
+      "DependsOn": "EC2InstanceNat2",
+      "Properties": {
+        "RouteTableId": {
+          "Ref": "RouteTableNat2"
+        },
+        "DestinationCidrBlock": "0.0.0.0/0",
+        "InstanceId": {
+          "Ref": "EC2InstanceNat2"
+        }
+      }
+    }
+  },
+  "Outputs": {
+    "EC2InstanceBastionEIP": {
+      "Value": {
+        "Ref": "EC2InstanceBastionEIP"
+      }
+    },
+    "EC2InstanceNat1EIP": {
+      "Value": {
+        "Ref": "EC2InstanceNat1EIP"
+      }
+    },
+    "EC2InstanceNat2EIP": {
+      "Value": {
+        "Ref": "EC2InstanceNat2EIP"
+      }
+    }
+  }
+}

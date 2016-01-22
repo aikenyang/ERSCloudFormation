@@ -1,0 +1,187 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "opsworks stack",
+  "Mappings": {
+    "Region2Principal": {
+      "us-east-1": {
+        "EC2Principal": "ec2.amazonaws.com",
+        "OpsWorksPrincipal": "opsworks.amazonaws.com"
+      },
+      "us-west-2": {
+        "EC2Principal": "ec2.amazonaws.com",
+        "OpsWorksPrincipal": "opsworks.amazonaws.com"
+      },
+      "us-west-1": {
+        "EC2Principal": "ec2.amazonaws.com",
+        "OpsWorksPrincipal": "opsworks.amazonaws.com"
+      },
+      "eu-west-1": {
+        "EC2Principal": "ec2.amazonaws.com",
+        "OpsWorksPrincipal": "opsworks.amazonaws.com"
+      },
+      "ap-southeast-1": {
+        "EC2Principal": "ec2.amazonaws.com",
+        "OpsWorksPrincipal": "opsworks.amazonaws.com"
+      },
+      "ap-northeast-1": {
+        "EC2Principal": "ec2.amazonaws.com",
+        "OpsWorksPrincipal": "opsworks.amazonaws.com"
+      },
+      "ap-southeast-2": {
+        "EC2Principal": "ec2.amazonaws.com",
+        "OpsWorksPrincipal": "opsworks.amazonaws.com"
+      },
+      "sa-east-1": {
+        "EC2Principal": "ec2.amazonaws.com",
+        "OpsWorksPrincipal": "opsworks.amazonaws.com"
+      },
+      "cn-north-1": {
+        "EC2Principal": "ec2.amazonaws.com.cn",
+        "OpsWorksPrincipal": "opsworks.amazonaws.com.cn"
+      },
+      "eu-central-1": {
+        "EC2Principal": "ec2.amazonaws.com",
+        "OpsWorksPrincipal": "opsworks.amazonaws.com"
+      }
+    }
+  },
+  "Resources": {
+    "OpsWorksServiceRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": [
+                  {
+                    "Fn::FindInMap": [
+                      "Region2Principal",
+                      {"Ref": "AWS::Region"},
+                      "OpsWorksPrincipal"
+                    ]
+                  }
+                ]
+              },
+              "Action": ["sts:AssumeRole"]
+            }
+          ]
+        },
+        "Path": "/",
+        "Policies": [
+          {
+            "PolicyName": "opsworks-service",
+            "PolicyDocument": {
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "ec2:*",
+                    "iam:PassRole",
+                    "cloudwatch:GetMetricStatistics",
+                    "elasticloadbalancing:*"
+                  ],
+                  "Resource": ["*"]
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "OpsWorksInstanceRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": [
+                  {
+                    "Fn::FindInMap": [
+                      "Region2Principal",
+                      {"Ref": "AWS::Region"},
+                      "EC2Principal"
+                    ]
+                  }
+                ]
+              },
+              "Action": ["sts:AssumeRole"]
+            }
+          ]
+        },
+        "Path": "/",
+        "Policies": [
+          {
+            "PolicyName": "opsworks-instance-s3-policy",
+            "PolicyDocument": {
+              "Statement": [
+                {
+                  "Effect": "Allow",
+                  "Action": [
+                    "s3:GetObject",
+                    "s3:ListBucket",
+                    "s3:ListBucketVersions"
+                  ],
+                  "Resource": [
+                    "arn:aws:s3:::mongodb-cloudformation/*"
+                  ]
+                }
+              ]
+            }
+          },
+          {
+            "PolicyName": "opsworks-instance-dynamodb-full-access",
+            "PolicyDocument": {
+              "Statement": [
+                {
+                  "Action": [
+                    "dynamodb:*"
+                  ],
+                  "Effect": "Allow",
+                  "Resource": "*"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "OpsWorksInstanceProfile": {
+      "Type": "AWS::IAM::InstanceProfile",
+      "DependsOn": ["OpsWorksInstanceRole"],
+      "Properties": {
+        "Path": "/",
+        "Roles": [{"Ref": "OpsWorksInstanceRole"}]
+      }
+    }
+  },
+  "Outputs": {
+    "OpsWorksServiceRoleArn": {
+      "Value": {
+        "Fn::GetAtt": [
+          "OpsWorksServiceRole",
+          "Arn"
+        ]
+      }
+    },
+    "OpsWorksInstanceRoleArn": {
+      "Value": {
+        "Fn::GetAtt": [
+          "OpsWorksInstanceRole",
+          "Arn"
+        ]
+      }
+    },
+    "OpsWorksInstanceProfileArn": {
+      "Value": {
+        "Fn::GetAtt": [
+          "OpsWorksInstanceProfile",
+          "Arn"
+        ]
+      }
+    }
+  }
+}
